@@ -8,16 +8,24 @@ using Avalonia.Platform;
 
 namespace DesktopClawd;
 
-/// <summary>One frame: a region of a sprite sheet, in art pixels.</summary>
-public readonly record struct SpriteFrame(Bitmap Sheet, PixelRect Source);
+/// <summary>
+/// One frame: a region of a sprite sheet (in art pixels), which of its pixels are opaque,
+/// and its first non-empty row (where the head is).
+/// </summary>
+public readonly record struct SpriteFrame(Bitmap Sheet, PixelRect Source, bool[] Opaque, int TopRow)
+{
+    public bool IsOpaque(int x, int y) =>
+        x >= 0 && y >= 0 && x < Source.Width && y < Source.Height && Opaque[y * Source.Width + x];
+}
 
 /// <summary>
-/// Loads each animation from sprites/&lt;name&gt;.png (a horizontal strip of square frames),
-/// falling back to the built-in placeholders in <see cref="SpriteFrames"/>.
+/// Loads each animation from sprites/&lt;name&gt;.png (a horizontal strip of square frames) and each
+/// effect from sprites/fx/&lt;name&gt;.png, falling back to the built-in placeholders in <see cref="SpriteFrames"/>.
 /// </summary>
 public sealed class SpriteLibrary
 {
     private Dictionary<Anim, SpriteFrame[]> _frames = new();
+    private Dictionary<Fx, SpriteFrame> _fx = new();
 
     public SpriteLibrary()
     {
@@ -28,21 +36,26 @@ public sealed class SpriteLibrary
     /// <summary>Where custom sprites are read from.</summary>
     public string Directory { get; }
 
-    /// <summary>Animations currently using custom PNGs rather than placeholders.</summary>
-    public IReadOnlyList<Anim> Custom { get; private set; } = [];
-
     /// <summary>Canvas size in art pixels: large enough for every frame, and at least 16×16.</summary>
     public PixelSize Canvas { get; private set; }
 
     public void Reload()
     {
         var frames = new Dictionary<Anim, SpriteFrame[]>();
-        var custom = new List<Anim>();
         foreach (var anim in Enum.GetValues<Anim>())
         {
-            var loaded = TryLoadStrip(Path.Combine(Directory, SpriteFrames.FileName(anim)));
-            if (loaded is not null) custom.Add(anim);
-            frames[anim] = loaded ?? SpriteFrames.Placeholders[anim].Select(FromText).ToArray();
+            frames[anim] = TryLoadStrip(Path.Combine(Directory, SpriteFrames.FileName(anim)))
+                           ?? SpriteFrames.Placeholders[anim].Select(rows => FromText(rows)).ToArray();
+        }
+
+        var fx = new Dictionary<Fx, SpriteFrame>();
+        var customZ = TryLoadImage(Path.Combine(Directory, "fx", SpriteFrames.FileName(Fx.Z)!));
+        foreach (var effect in Enum.GetValues<Fx>())
+        {
+            var custom = effect == Fx.ZSmall
+                ? customZ
+                : TryLoadImage(Path.Combine(Directory, "fx", SpriteFrames.FileName(effect)!));
+            fx[effect] = custom ?? FromText(SpriteFrames.FxPlaceholders[effect], outline: true);
         }
 
         var width = SpriteFrames.Canvas;
@@ -55,7 +68,7 @@ public sealed class SpriteLibrary
 
         // Old bitmaps aren't disposed: the renderer may still reference them, and reloads are rare.
         _frames = frames;
-        Custom = custom;
+        _fx = fx;
         Canvas = new PixelSize(width, height);
     }
 
@@ -66,22 +79,38 @@ public sealed class SpriteLibrary
         return frames[index];
     }
 
-    /// <summary>Draws a frame bottom-aligned and horizontally centred on the canvas.</summary>
-    public void Draw(DrawingContext ctx, SpriteFrame frame, double scale, bool flip, Point offset = default)
+    public SpriteFrame Effect(Fx fx) => _fx[fx];
+
+    /// <summary>Top-left of a frame on the canvas, in art pixels (bottom-aligned, horizontally centred).</summary>
+    public (int X, int Y) Placement(SpriteFrame frame) =>
+        ((Canvas.Width - frame.Source.Width) / 2, Canvas.Height - frame.Source.Height);
+
+    /// <summary>Draws a frame onto the canvas whose top-left is at <paramref name="origin"/>.</summary>
+    public void Draw(DrawingContext ctx, SpriteFrame frame, double scale, bool flip, Point origin = default)
     {
-        var src = frame.Source;
-        var x = offset.X + (Canvas.Width - src.Width) / 2 * scale;
-        var y = offset.Y + (Canvas.Height - src.Height) * scale;
-        var dest = new Rect(x, y, src.Width * scale, src.Height * scale);
+        var (px, py) = Placement(frame);
+        var dest = new Rect(origin.X + px * scale, origin.Y + py * scale, frame.Source.Width * scale, frame.Source.Height * scale);
 
         // Mirror around the canvas centre when facing left.
         var transform = flip
-            ? Matrix.CreateScale(-1, 1) * Matrix.CreateTranslation(2 * offset.X + Canvas.Width * scale, 0)
+            ? Matrix.CreateScale(-1, 1) * Matrix.CreateTranslation(2 * origin.X + Canvas.Width * scale, 0)
             : Matrix.Identity;
         using (ctx.PushTransform(transform))
         {
-            ctx.DrawImage(frame.Sheet, new Rect(src.X, src.Y, src.Width, src.Height), dest);
+            DrawRegion(ctx, frame, dest);
         }
+    }
+
+    /// <summary>Draws a frame unmirrored with its top-left at the given point.</summary>
+    public static void DrawAt(DrawingContext ctx, SpriteFrame frame, double scale, Point topLeft) =>
+        DrawRegion(ctx, frame, new Rect(topLeft.X, topLeft.Y, frame.Source.Width * scale, frame.Source.Height * scale));
+
+    /// <summary>Whether the art pixel at canvas coordinates (x, y) is opaque in the frame as drawn.</summary>
+    public bool HitTest(SpriteFrame frame, bool flip, double x, double y)
+    {
+        if (flip) x = Canvas.Width - x;
+        var (px, py) = Placement(frame);
+        return frame.IsOpaque((int)Math.Floor(x - px), (int)Math.Floor(y - py));
     }
 
     public WindowIcon CreateIcon()
@@ -98,41 +127,61 @@ public sealed class SpriteLibrary
     }
 
     /// <summary>
-    /// Writes each placeholder animation as a PNG strip of 16×16 frames, the same format custom
-    /// sprites use, so they can be opened in an editor and drawn over. Returns the frame counts
-    /// read back from the written files.
+    /// Writes each placeholder animation as a PNG strip of 16×16 frames, and each effect glyph
+    /// under fx/, in the same formats custom sprites use, so they can be drawn over.
+    /// Returns the frame counts read back from the written files.
     /// </summary>
-    public static IEnumerable<(Anim Anim, string Path, int Frames)> ExportTemplates(string directory)
+    public static IEnumerable<(string Name, string Path, int Frames)> ExportTemplates(string directory)
     {
-        System.IO.Directory.CreateDirectory(directory);
         var size = SpriteFrames.Canvas;
+        System.IO.Directory.CreateDirectory(directory);
         foreach (var anim in Enum.GetValues<Anim>())
         {
             var frames = SpriteFrames.Placeholders[anim];
-            var strip = new PixelSize(size * frames.Length, size);
-            using var bitmap = new WriteableBitmap(strip, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
-            using (var buffer = bitmap.Lock())
-            {
-                var pixels = new int[strip.Width * strip.Height];
-                for (var f = 0; f < frames.Length; f++)
-                {
-                    var rows = frames[f];
-                    var top = size - rows.Length; // bottom-aligned
-                    for (var y = 0; y < rows.Length; y++)
-                    for (var x = 0; x < rows[y].Length; x++)
-                    {
-                        if (SpriteFrames.Palette.TryGetValue(rows[y][x], out var hex))
-                            pixels[(top + y) * strip.Width + f * size + x] = (int)Color.Parse(hex).ToUInt32();
-                    }
-                }
-                for (var y = 0; y < strip.Height; y++)
-                    Marshal.Copy(pixels, y * strip.Width, buffer.Address + y * buffer.RowBytes, strip.Width);
-            }
-
             var path = Path.Combine(directory, SpriteFrames.FileName(anim));
-            bitmap.Save(path, PngBitmapEncoderOptions.Default);
-            yield return (anim, path, TryLoadStrip(path)?.Length ?? 0);
+            SavePng(path, size * frames.Length, size, (x, y) =>
+            {
+                // Frames side by side, each bottom-aligned in its 16×16 cell.
+                var rows = frames[x / size];
+                var row = y - (size - rows.Length);
+                return row >= 0 && x % size < rows[row].Length ? rows[row][x % size] : '.';
+            });
+            yield return (anim.ToString(), path, TryLoadStrip(path)?.Length ?? 0);
         }
+
+        var fxDir = Path.Combine(directory, "fx");
+        System.IO.Directory.CreateDirectory(fxDir);
+        foreach (var fx in Enum.GetValues<Fx>())
+        {
+            if (SpriteFrames.FileName(fx) is not { } name) continue;
+            var rows = SpriteFrames.FxPlaceholders[fx];
+            var path = Path.Combine(fxDir, name);
+            SavePng(path, rows[0].Length, rows.Length, (x, y) => rows[y][x]);
+            yield return ($"fx/{fx}", path, TryLoadImage(path) is null ? 0 : 1);
+        }
+    }
+
+    private static void DrawRegion(DrawingContext ctx, SpriteFrame frame, Rect dest)
+    {
+        var src = frame.Source;
+        ctx.DrawImage(frame.Sheet, new Rect(src.X, src.Y, src.Width, src.Height), dest);
+    }
+
+    private static void SavePng(string path, int width, int height, Func<int, int, char> pixelAt)
+    {
+        var size = new PixelSize(width, height);
+        using var bitmap = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+        using (var buffer = bitmap.Lock())
+        {
+            var line = new int[width];
+            for (var y = 0; y < height; y++)
+            {
+                for (var x = 0; x < width; x++)
+                    line[x] = SpriteFrames.Palette.TryGetValue(pixelAt(x, y), out var hex) ? (int)Color.Parse(hex).ToUInt32() : 0;
+                Marshal.Copy(line, 0, buffer.Address + y * buffer.RowBytes, width);
+            }
+        }
+        bitmap.Save(path, PngBitmapEncoderOptions.Default);
     }
 
     private static SpriteFrame[]? TryLoadStrip(string path)
@@ -142,11 +191,12 @@ public sealed class SpriteLibrary
         {
             var sheet = new Bitmap(path);
             var (w, h) = (sheet.PixelSize.Width, sheet.PixelSize.Height);
+            var alpha = ReadAlpha(sheet);
             // Square frames side by side; anything else is treated as a single frame.
             var count = w % h == 0 ? w / h : 1;
             var frameWidth = w / count;
             return Enumerable.Range(0, count)
-                .Select(i => new SpriteFrame(sheet, new PixelRect(i * frameWidth, 0, frameWidth, h)))
+                .Select(i => MakeFrame(sheet, new PixelRect(i * frameWidth, 0, frameWidth, h), alpha, w))
                 .ToArray();
         }
         catch (Exception ex)
@@ -156,24 +206,89 @@ public sealed class SpriteLibrary
         }
     }
 
-    private static SpriteFrame FromText(string[] rows)
+    private static SpriteFrame? TryLoadImage(string path)
     {
-        var size = new PixelSize(rows.Max(r => r.Length), rows.Length);
+        if (!File.Exists(path)) return null;
+        try
+        {
+            var sheet = new Bitmap(path);
+            return MakeFrame(sheet, new PixelRect(sheet.PixelSize), ReadAlpha(sheet), sheet.PixelSize.Width);
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"Could not load effect {path}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Alpha channel of a whole sheet, row-major.</summary>
+    private static byte[] ReadAlpha(Bitmap sheet)
+    {
+        var size = sheet.PixelSize;
+        using var copy = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
+        using var buffer = copy.Lock();
+        sheet.CopyPixels(buffer);
+        var alpha = new byte[size.Width * size.Height];
+        var row = new byte[size.Width * 4];
+        for (var y = 0; y < size.Height; y++)
+        {
+            Marshal.Copy(buffer.Address + y * buffer.RowBytes, row, 0, row.Length);
+            for (var x = 0; x < size.Width; x++) alpha[y * size.Width + x] = row[x * 4 + 3];
+        }
+        return alpha;
+    }
+
+    private static SpriteFrame MakeFrame(Bitmap sheet, PixelRect source, byte[] sheetAlpha, int sheetWidth)
+    {
+        var opaque = new bool[source.Width * source.Height];
+        var top = source.Height;
+        for (var y = 0; y < source.Height; y++)
+        for (var x = 0; x < source.Width; x++)
+        {
+            if (sheetAlpha[(source.Y + y) * sheetWidth + source.X + x] < 128) continue;
+            opaque[y * source.Width + x] = true;
+            top = Math.Min(top, y);
+        }
+        return new SpriteFrame(sheet, source, opaque, top == source.Height ? 0 : top);
+    }
+
+    /// <summary>Builds a frame from text rows, optionally adding a 1-pixel dark outline around it.</summary>
+    private static SpriteFrame FromText(string[] rows, bool outline = false)
+    {
+        var pad = outline ? 1 : 0;
+        var width = rows.Max(r => r.Length) + 2 * pad;
+        var height = rows.Length + 2 * pad;
+
+        char At(int x, int y)
+        {
+            x -= pad;
+            y -= pad;
+            return y >= 0 && y < rows.Length && x >= 0 && x < rows[y].Length ? rows[y][x] : '.';
+        }
+        bool Filled(int x, int y) => SpriteFrames.Palette.ContainsKey(At(x, y));
+
+        var outlineColor = (int)Color.Parse(SpriteFrames.FxOutline).ToUInt32();
+        var pixels = new int[width * height];
+        var alpha = new byte[width * height];
+        for (var y = 0; y < height; y++)
+        for (var x = 0; x < width; x++)
+        {
+            var i = y * width + x;
+            if (SpriteFrames.Palette.TryGetValue(At(x, y), out var hex))
+                pixels[i] = (int)Color.Parse(hex).ToUInt32();
+            else if (outline && (Filled(x - 1, y) || Filled(x + 1, y) || Filled(x, y - 1) || Filled(x, y + 1)))
+                pixels[i] = outlineColor;
+            if (pixels[i] != 0) alpha[i] = 255;
+        }
+
+        var size = new PixelSize(width, height);
         var bitmap = new WriteableBitmap(size, new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
         using (var buffer = bitmap.Lock())
         {
-            var line = new int[size.Width];
-            for (var y = 0; y < size.Height; y++)
-            {
-                for (var x = 0; x < size.Width; x++)
-                {
-                    var c = x < rows[y].Length ? rows[y][x] : '.';
-                    line[x] = SpriteFrames.Palette.TryGetValue(c, out var hex) ? (int)Color.Parse(hex).ToUInt32() : 0;
-                }
-                Marshal.Copy(line, 0, buffer.Address + y * buffer.RowBytes, size.Width);
-            }
+            for (var y = 0; y < height; y++)
+                Marshal.Copy(pixels, y * width, buffer.Address + y * buffer.RowBytes, width);
         }
-        return new SpriteFrame(bitmap, new PixelRect(size));
+        return MakeFrame(bitmap, new PixelRect(size), alpha, width);
     }
 
     /// <summary>
