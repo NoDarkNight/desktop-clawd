@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>DesktopClawd</RootNamespace>
+    <AssemblyName>DesktopClawd</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Custom sprites (see sprites/README.md); missing ones fall back to built-in placeholders. -->
+    <None Include="sprites\*.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.3" />
+  </ItemGroup>
+
+  <!-- SkiaSharp/HarfBuzz ship ~100 MB of native debug symbols; don't publish them. -->
+  <Target Name="RemoveNativePdbsFromPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <_PublishedPdb Include="$(PublishDir)**\*.pdb" />
+    </ItemGroup>
+    <Delete Files="@(_PublishedPdb)" />
+  </Target>
+
+</Project>
