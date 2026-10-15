@@ -25,12 +25,15 @@ public interface IPetHost
 
     /// <summary>Custom emote animations available to play while idle.</summary>
     IReadOnlyList<EmoteInfo> Emotes { get; }
+
+    /// <summary>Whether a point is on any monitor (used to find a screen edge with nothing beyond it).</summary>
+    bool IsOnScreen(double x, double y);
 }
 
 /// <summary>An emote animation and how long one performance of it lasts, in seconds.</summary>
 public readonly record struct EmoteInfo(string Name, double Duration);
 
-public enum PetState { Idle, Walk, Sleep, Held, Falling, Hop, Jump, Land, Slide, Dizzy, Wake, Emote, Working, Alert, Celebrate }
+public enum PetState { Idle, Walk, Sleep, Held, Falling, Hop, Jump, Land, Slide, Dizzy, Wake, Emote, Sip, CoffeeOut, CoffeeAway, CoffeeBack, CoffeeReturn, CoffeeDropOff, CoffeeHome, Working, Alert, Celebrate }
 
 /// <summary>What Claude Code is doing, as reported by its hooks.</summary>
 public enum ClaudeActivity { None, Working, NeedsAttention, Done }
@@ -96,6 +99,15 @@ public sealed class PetBrain(IPetHost host)
     private const double AttentionTimeout = 300;
     private const double CelebrateTime = 3;
 
+    // Coffee run: after enough time working, Clawd walks off the nearest open screen edge, comes back
+    // carrying a coffee, sips it, and gets back to work.
+    private const double CoffeeStartRate = 1.0 / 20; // per second once it's earned one (so ~20 s on average)
+    private const double CoffeeHurry = 1.4;          // walks off faster than usual
+    private const double CoffeeAwayMin = 6, CoffeeAwayMax = 12; // s off-screen
+    private const double CoffeeReturnMin = 10, CoffeeReturnMax = 40;   // DIP inside the edge where it stops (stays near the edge)
+    private const double SipTime = 3.5;              // s
+    private const double CoffeeDropOffMin = 2, CoffeeDropOffMax = 4; // s off-screen returning the cup
+
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly Random _rng = new();
 
@@ -117,6 +129,10 @@ public sealed class PetBrain(IPetHost host)
     private WorkKind _workKind;
     private double _claudeTime;
     private string? _emote;
+    private double _workedSinceCoffee; // s of Claude working since the last coffee
+    private WorkArea _coffeeArea;
+    private int _coffeeDir;           // -1 = left edge, +1 = right edge
+    private double _coffeeStopX;
 
     private bool _pressed, _dragging;
     private double _pressX, _pressY, _grabX, _grabY;
@@ -135,6 +151,11 @@ public sealed class PetBrain(IPetHost host)
     /// <summary>Seconds without keyboard/mouse input before it naps.</summary>
     public double SleepAfterIdle { get; init; } = 90;
 
+    /// <summary>Seconds of Claude working before Clawd goes for a coffee.</summary>
+    public double CoffeeAfter { get; init; } = 300;
+
+    /// <summary>An object carried outside its animation's usual one (the coffee, to and from the sip).</summary>
+    public string? CarriedObject => _state is PetState.CoffeeBack or PetState.CoffeeReturn ? "coffee" : null;
     public PetEffect Effect => _state switch
     {
         PetState.Sleep => PetEffect.Sleeping,
@@ -187,6 +208,7 @@ public sealed class PetBrain(IPetHost host)
 
         if (_claude != ClaudeActivity.None && (_claudeTime -= dt) <= 0)
             _claude = ClaudeActivity.None;
+        if (_claude == ClaudeActivity.Working) _workedSinceCoffee += dt;
 
         switch (_state)
         {
@@ -197,6 +219,15 @@ public sealed class PetBrain(IPetHost host)
                 break;
 
             case PetState.Held:
+                break;
+
+            case PetState.CoffeeOut:
+            case PetState.CoffeeAway:
+            case PetState.CoffeeBack:
+            case PetState.CoffeeReturn:
+            case PetState.CoffeeDropOff:
+            case PetState.CoffeeHome:
+                TickCoffeeRun(dt);
                 break;
 
             default:
@@ -257,6 +288,9 @@ public sealed class PetBrain(IPetHost host)
             case PetState.Emote:
                 if (_stateTime <= 0) Enter(PetState.Idle, 0.5);
                 return;
+            case PetState.Sip:
+                if (_stateTime <= 0) StartCoffeeReturn();
+                return;
         }
 
         // Claude activity takes priority over everything else.
@@ -269,6 +303,11 @@ public sealed class PetBrain(IPetHost host)
         };
         if (wanted is { } claudeState)
         {
+            // A long stretch of work earns a coffee break.
+            if (claudeState == PetState.Working && _state == PetState.Working && _surface.Id == 0
+                && _workedSinceCoffee >= CoffeeAfter && _rng.NextDouble() < CoffeeStartRate * dt
+                && TryStartCoffeeRun(area))
+                return;
             // Alert hops every so often to get your attention; celebrate hops continuously.
             if (_state != claudeState) Enter(claudeState, claudeState == PetState.Alert ? 1.2 : 0);
             if (claudeState != PetState.Working && _stateTime <= 0)
@@ -396,6 +435,87 @@ public sealed class PetBrain(IPetHost host)
         FacingLeft = _vx < 0;
         Enter(PetState.Jump);
         return true;
+    }
+
+    // --- Coffee run ---
+
+    /// <summary>Heads for the nearest screen edge that doesn't lead onto another monitor.</summary>
+    private bool TryStartCoffeeRun(WorkArea area)
+    {
+        var midY = area.Bottom - H / 2;
+        var leftOpen = !host.IsOnScreen(area.Left - W, midY);
+        var rightOpen = !host.IsOnScreen(area.Right + W, midY);
+        if (!leftOpen && !rightOpen) return false;
+
+        var cx = _x + W / 2;
+        _coffeeDir = leftOpen && rightOpen ? (cx - area.Left < area.Right - cx ? -1 : 1) : leftOpen ? -1 : 1;
+        _coffeeArea = area;
+        _workedSinceCoffee = 0;
+        _vx = _coffeeDir * WalkSpeed * CoffeeHurry * S;
+        FacingLeft = _coffeeDir < 0;
+        Enter(PetState.CoffeeOut);
+        return true;
+    }
+
+    /// <summary>
+    /// The trip, on the floor it left from: walk off-screen (CoffeeOut), fetch it (CoffeeAway), walk back
+    /// in with the cup (CoffeeBack), sip (Sip, a grounded state), take the cup back off-screen
+    /// (CoffeeReturn), drop it off (CoffeeDropOff), and walk back in empty-handed (CoffeeHome).
+    /// </summary>
+    private void TickCoffeeRun(double dt)
+    {
+        var area = _coffeeArea;
+        _y = area.Bottom - H;
+
+        switch (_state)
+        {
+            case PetState.CoffeeOut:
+                if (WalkedOff(area, dt)) Enter(PetState.CoffeeAway, CoffeeAwayMin + _rng.NextDouble() * (CoffeeAwayMax - CoffeeAwayMin));
+                break;
+
+            case PetState.CoffeeReturn:
+                if (WalkedOff(area, dt)) Enter(PetState.CoffeeDropOff, CoffeeDropOffMin + _rng.NextDouble() * (CoffeeDropOffMax - CoffeeDropOffMin));
+                break;
+
+            case PetState.CoffeeAway:
+            case PetState.CoffeeDropOff:
+                // Hurries back early if Claude needs you.
+                if (_stateTime > 0 && _claude != ClaudeActivity.NeedsAttention) break;
+                var walkIn = (CoffeeReturnMin + _rng.NextDouble() * (CoffeeReturnMax - CoffeeReturnMin)) * S;
+                _x = _coffeeDir < 0 ? area.Left - W : area.Right;
+                _coffeeStopX = _coffeeDir < 0 ? area.Left + walkIn : area.Right - W - walkIn;
+                _vx = -_coffeeDir * WalkSpeed * S;
+                FacingLeft = _vx < 0;
+                Enter(_state == PetState.CoffeeAway ? PetState.CoffeeBack : PetState.CoffeeHome);
+                break;
+
+            case PetState.CoffeeBack:
+            case PetState.CoffeeHome:
+                _x += _vx * dt;
+                if (_vx > 0 ? _x >= _coffeeStopX : _x <= _coffeeStopX)
+                {
+                    _vx = 0;
+                    _surface = Floor(area);
+                    if (_state == PetState.CoffeeBack) Enter(PetState.Sip, SipTime);
+                    else Enter(PetState.Idle, 0.5); // back to whatever it was doing (work resumes if Claude still is)
+                }
+                break;
+        }
+    }
+
+    /// <summary>Walks towards the run's screen edge; true once fully off-screen.</summary>
+    private bool WalkedOff(WorkArea area, double dt)
+    {
+        _x += _vx * dt;
+        return _coffeeDir < 0 ? _x + W < area.Left : _x > area.Right;
+    }
+
+    /// <summary>After sipping, takes the cup back the way it came.</summary>
+    private void StartCoffeeReturn()
+    {
+        _vx = _coffeeDir * WalkSpeed * S;
+        FacingLeft = _coffeeDir < 0;
+        Enter(PetState.CoffeeReturn);
     }
 
     // --- In the air ---
@@ -624,6 +744,9 @@ public sealed class PetBrain(IPetHost host)
             PetState.Dizzy => Anim.Dizzy,
             PetState.Wake => Anim.Wake,
             PetState.Emote => Anim.Emote,
+            PetState.Sip => Anim.Sip,
+            PetState.CoffeeOut or PetState.CoffeeAway or PetState.CoffeeBack or PetState.CoffeeReturn
+                or PetState.CoffeeDropOff or PetState.CoffeeHome => Anim.Walk,
             PetState.Working => _workKind switch
             {
                 WorkKind.Reading => Anim.Reading,

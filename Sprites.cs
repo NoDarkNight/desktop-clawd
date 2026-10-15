@@ -11,11 +11,12 @@ namespace DesktopClawd;
 
 /// <summary>
 /// One frame: a region of a sprite sheet (in art pixels), which of its pixels are opaque, its first
-/// non-empty row (where the head is), its rightmost non-empty column, and the marker pixel (if any)
-/// saying where a held object goes — or, in an object, where it's held.
+/// non-empty row (where the head is), its rightmost non-empty column, and the marker point (if any)
+/// saying where a held object goes — or, in an object, where it's held. Several marker pixels mark their
+/// centre, which can fall between pixels (two stacked markers = half a pixel lower than the top one).
 /// </summary>
 public readonly record struct SpriteFrame(
-    Bitmap Sheet, PixelRect Source, bool[] Opaque, int TopRow, int RightCol, PixelPoint? Marker, bool MarkerBehind)
+    Bitmap Sheet, PixelRect Source, bool[] Opaque, int TopRow, int RightCol, Point? Marker, bool MarkerBehind)
 {
     public bool IsOpaque(int x, int y) =>
         x >= 0 && y >= 0 && x < Source.Width && y < Source.Height && Opaque[y * Source.Width + x];
@@ -98,7 +99,7 @@ public sealed class SpriteLibrary
             var match = Regex.Match(Path.GetFileNameWithoutExtension(path), @"^(?<name>.+?)(@(?<n>\d+))?$");
             if (TryLoadSheet(path) is not { } sheet) continue;
             var count = int.TryParse(match.Groups["n"].Value, out var n) && n > 0 && sheet.Width % n == 0 ? n : 1;
-            objects[match.Groups["name"].Value.ToLowerInvariant()] = CutStrip(sheet, count);
+            objects[match.Groups["name"].Value.ToLowerInvariant()] = CutStrip(sheet, count, trim: true);
             customNames.Add("objects/" + match.Groups["name"].Value.ToLowerInvariant());
         }
 
@@ -142,12 +143,21 @@ public sealed class SpriteLibrary
         _emotes.TryGetValue(name, out var frames) ? frames[(int)(seconds * SpriteFrames.EmoteFps) % frames.Length] : null;
 
     /// <summary>The object held during an animation (following fallbacks), if there is one.</summary>
+    /// <remarks>
+    /// An animation's own object wins if it exists (sip keeps its coffee while borrowing idle's frames);
+    /// otherwise it uses the object of the animation whose art it borrows (reading shows the laptop until
+    /// there's a book).
+    /// </remarks>
     public SpriteFrame? HeldObjectAt(Anim anim, double seconds)
     {
-        if (!SpriteFrames.HeldObjects.TryGetValue(_artOf[anim], out var name) || !_objects.TryGetValue(name, out var frames))
-            return null;
-        return frames[(int)(seconds * ObjectFps) % frames.Length];
+        if (SpriteFrames.HeldObjects.TryGetValue(anim, out var own) && ObjectAt(own, seconds) is { } ownFrame)
+            return ownFrame;
+        return SpriteFrames.HeldObjects.TryGetValue(_artOf[anim], out var borrowed) ? ObjectAt(borrowed, seconds) : null;
     }
+
+    /// <summary>A named object's frame, or null if there's no such object.</summary>
+    public SpriteFrame? ObjectAt(string name, double seconds) =>
+        _objects.TryGetValue(name, out var frames) ? frames[(int)(seconds * ObjectFps) % frames.Length] : null;
 
     public SpriteFrame Effect(Fx fx) => _fx[fx];
 
@@ -155,7 +165,7 @@ public sealed class SpriteLibrary
     public IEnumerable<string> Describe()
     {
         static string Marker(SpriteFrame[] f) => f.FirstOrDefault(x => x.Marker is not null) is { Marker: { } m } x
-            ? $"  marker at {m.X},{m.Y} ({(x.MarkerBehind ? "behind" : "in front")})" : "";
+            ? $"  marker at {m.X:0.#},{m.Y:0.#} ({(x.MarkerBehind ? "behind" : "in front")})" : "";
 
         yield return $"Sprites folder: {Directory}";
         yield return $"Canvas {Canvas.Width}x{Canvas.Height}, side margin {SideMargin}";
@@ -164,7 +174,9 @@ public sealed class SpriteLibrary
             if (anim == Anim.Emote) continue;
             var art = _artOf[anim];
             var source = art != anim ? $"uses {art}" : _custom.Contains(anim.ToString()) ? "your art" : "placeholder";
-            var held = SpriteFrames.HeldObjects.TryGetValue(art, out var o) ? $"  holds {o}{(_objects.ContainsKey(o) ? "" : " (missing)")}" : "";
+            var heldName = SpriteFrames.HeldObjects.TryGetValue(anim, out var own) && _objects.ContainsKey(own) ? own
+                : SpriteFrames.HeldObjects.TryGetValue(art, out var borrowed) ? borrowed : null;
+            var held = heldName is null ? "" : $"  holds {heldName}{(_objects.ContainsKey(heldName) ? "" : " (missing)")}";
             yield return $"  {anim,-10} {source,-15} {_frames[art].Length} frame(s){Marker(_frames[art])}{held}";
         }
         foreach (var (name, f) in _objects)
@@ -196,8 +208,8 @@ public sealed class SpriteLibrary
         var (px, py) = Placement(character);
         var bottom = obj.Source.Height - 1;
         var (anchor, grip) = character.Marker is { } m
-            ? (new PixelPoint(px + m.X, py + m.Y), obj.Marker ?? new PixelPoint(obj.Source.Width / 2, bottom))
-            : (new PixelPoint(px + character.RightCol + 1, py + character.Source.Height - 1), obj.Marker ?? new PixelPoint(0, bottom));
+            ? (new Point(px + m.X, py + m.Y), obj.Marker ?? new Point(obj.Source.Width / 2, bottom))
+            : (new Point(px + character.RightCol + 1, py + character.Source.Height - 1), obj.Marker ?? new Point(0, bottom));
         DrawOnCanvas(ctx, obj, anchor.X - grip.X, anchor.Y - grip.Y, scale, flip, origin);
     }
 
@@ -352,10 +364,32 @@ public sealed class SpriteLibrary
     private static SpriteFrame[] CutSquares(Sheet sheet) =>
         CutStrip(sheet, sheet.Width % sheet.Height == 0 ? sheet.Width / sheet.Height : 1);
 
-    private static SpriteFrame[] CutStrip(Sheet sheet, int count)
+    /// <param name="trim">
+    /// Crop away empty space around the art (and markers), using one box for every frame so
+    /// animated frames stay aligned. Used for objects, whose default grip is their bottom edge.
+    /// </param>
+    private static SpriteFrame[] CutStrip(Sheet sheet, int count, bool trim = false)
     {
         var frameWidth = sheet.Width / count;
-        return Enumerable.Range(0, count).Select(i => Cut(sheet, new PixelRect(i * frameWidth, 0, frameWidth, sheet.Height))).ToArray();
+        var rects = Enumerable.Range(0, count).Select(i => new PixelRect(i * frameWidth, 0, frameWidth, sheet.Height)).ToArray();
+
+        if (trim)
+        {
+            int minX = int.MaxValue, minY = int.MaxValue, maxX = -1, maxY = -1;
+            foreach (var r in rects)
+            for (var y = 0; y < r.Height; y++)
+            for (var x = 0; x < r.Width; x++)
+            {
+                var filled = (uint)sheet.Pixels[y * sheet.Width + r.X + x] >> 24 >= 128
+                             || sheet.Markers.Any(m => m.X == r.X + x && m.Y == y);
+                if (!filled) continue;
+                minX = Math.Min(minX, x); maxX = Math.Max(maxX, x);
+                minY = Math.Min(minY, y); maxY = Math.Max(maxY, y);
+            }
+            if (maxX >= 0)
+                rects = rects.Select(r => new PixelRect(r.X + minX, minY, maxX - minX + 1, maxY - minY + 1)).ToArray();
+        }
+        return rects.Select(r => Cut(sheet, r)).ToArray();
     }
 
     private static SpriteFrame Cut(Sheet sheet) => Cut(sheet, new PixelRect(0, 0, sheet.Width, sheet.Height));
@@ -374,21 +408,17 @@ public sealed class SpriteLibrary
             right = Math.Max(right, x);
         }
 
-        PixelPoint? marker = null;
-        var behind = false;
-        foreach (var (mx, my, b) in sheet.Markers)
-        {
-            if (!source.Contains(new PixelPoint(mx, my))) continue;
-            marker = new PixelPoint(mx - source.X, my - source.Y);
-            behind = b;
-            break;
-        }
+        // Several marker pixels mark their centre; front/behind comes from the first one.
+        var inFrame = sheet.Markers.Where(m => source.Contains(new PixelPoint(m.X, m.Y))).ToList();
+        Point? marker = inFrame.Count == 0 ? null
+            : new Point(inFrame.Average(m => m.X) - source.X, inFrame.Average(m => m.Y) - source.Y);
+        var behind = inFrame.Count > 0 && inFrame[0].Behind;
         return new SpriteFrame(sheet.Bitmap, source, opaque, top == source.Height ? 0 : top, Math.Max(right, 0), marker, behind);
     }
 
     // --- Drawing and saving ---
 
-    private void DrawOnCanvas(DrawingContext ctx, SpriteFrame frame, int x, int y, double scale, bool flip, Point origin)
+    private void DrawOnCanvas(DrawingContext ctx, SpriteFrame frame, double x, double y, double scale, bool flip, Point origin)
     {
         var dest = new Rect(origin.X + x * scale, origin.Y + y * scale, frame.Source.Width * scale, frame.Source.Height * scale);
         // Mirror around the canvas centre when facing left.
@@ -437,6 +467,7 @@ public sealed class SpriteLibrary
     /// </summary>
     private static string FindSpritesDirectory()
     {
+        if (Environment.GetEnvironmentVariable("CLAWD_SPRITES") is { Length: > 0 } custom) return Path.GetFullPath(custom);
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
         {
             if (File.Exists(Path.Combine(dir.FullName, "DesktopClawd.csproj")))

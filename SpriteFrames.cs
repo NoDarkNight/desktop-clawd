@@ -3,7 +3,7 @@ using System.Collections.Generic;
 namespace DesktopClawd;
 
 /// <summary>Every animation the pet can show. Custom art goes in sprites/&lt;name&gt;.png (lowercase).</summary>
-public enum Anim { Idle, Blink, Walk, Sleep, Held, Fall, Jump, Land, Slide, Dizzy, Wake, Happy, Working, Reading, Searching, Thinking, Alert, Celebrate, Emote }
+public enum Anim { Idle, Blink, Walk, Sleep, Held, Fall, Jump, Land, Slide, Dizzy, Wake, Happy, Sip, Working, Reading, Searching, Thinking, Alert, Celebrate, Emote }
 
 /// <summary>
 /// Effect glyphs drawn around the character and never mirrored, so text-like shapes stay readable.
@@ -46,6 +46,7 @@ public static class SpriteFrames
     public static readonly IReadOnlyDictionary<Anim, Anim> Fallbacks = new Dictionary<Anim, Anim>
     {
         [Anim.Slide] = Anim.Idle,
+        [Anim.Sip] = Anim.Idle,
         [Anim.Reading] = Anim.Working,
         [Anim.Searching] = Anim.Working,
         [Anim.Thinking] = Anim.Working,
@@ -54,6 +55,7 @@ public static class SpriteFrames
     /// <summary>Object (sprites/objects/&lt;name&gt;.png) held during an animation, if any.</summary>
     public static readonly IReadOnlyDictionary<Anim, string> HeldObjects = new Dictionary<Anim, string>
     {
+        [Anim.Sip] = "coffee",
         [Anim.Working] = "laptop",
         [Anim.Reading] = "book",
         [Anim.Searching] = "binoculars",
@@ -77,6 +79,7 @@ public static class SpriteFrames
         [Anim.Dizzy] = 4,
         [Anim.Wake] = 2,
         [Anim.Happy] = 6,
+        [Anim.Sip] = 3,
         [Anim.Working] = 6,
         [Anim.Reading] = 3,
         [Anim.Searching] = 3,
@@ -312,6 +315,15 @@ public static class SpriteFrames
             ".....BG.",
             "GGGGGGGG",
             "MKKKKKKK",
+        ],
+        // A mug, handle towards the character.
+        ["coffee"] =
+        [
+            "..WWW",
+            "WWWWW",
+            "W.WWW",
+            "WWWWW",
+            "..WWW",
         ],
     };
 

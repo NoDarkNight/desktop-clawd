@@ -31,12 +31,14 @@ public sealed class ClawdView : Control
 
     private Point CanvasOrigin => new(SideMargin * Scale, Headroom * Scale);
 
-    public void Show(Anim anim, double animTime, bool flip, PetEffect effect, string? emote, double dt, bool force = false)
+    public void Show(Anim anim, double animTime, bool flip, PetEffect effect, string? emote, string? carried, double dt, bool force = false)
     {
         // Emotes may contain text-like art (numbers, letters), so they're never mirrored.
         var emoteFrame = emote is null ? null : _sprites.EmoteFrameAt(emote, animTime);
         var frame = emoteFrame ?? _sprites.FrameAt(anim, animTime);
-        var obj = emoteFrame is null ? _sprites.HeldObjectAt(anim, animTime) : null;
+        var obj = emoteFrame is not null ? null
+            : carried is not null ? _sprites.ObjectAt(carried, animTime)
+            : _sprites.HeldObjectAt(anim, animTime);
         if (emoteFrame is not null) flip = false;
 
         var changed = force || frame != _frame || obj != _object || flip != _flip;

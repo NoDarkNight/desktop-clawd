@@ -40,6 +40,7 @@ Draw **only Clawd** — no Zs, "!" or props.
 | `slide.png` | 1–2 | Skidding to a stop after a throw *(uses `land.png` until drawn)* | | 4 |
 | `dizzy.png` | 2 | After being thrown hard | | 4 |
 | `happy.png` | 1–2 | Hop after being clicked | | 6 |
+| `sip.png` | 1–4 | Sipping the coffee after a coffee run *(uses `idle.png` until drawn)* | `coffee` | 3 |
 | `working.png` | 2–4 | Claude is editing files or running commands | `laptop` | 6 |
 | `reading.png` | 2–4 | Claude is reading/searching files *(uses `working.png` until drawn)* | `book` | 3 |
 | `searching.png` | 2–4 | Claude is searching the web *(uses `working.png` until drawn)* | `binoculars` | 3 |
@@ -48,11 +49,22 @@ Draw **only Clawd** — no Zs, "!" or props.
 | `celebrate.png` | 2–3 | Claude finished | | 6 |
 
 Speeds and held objects live in `SpriteFrames.cs` (`Fps`, `HeldObjects`) if you want to change them.
+An animation that borrows another's art keeps its own object if that object exists (`sip` keeps the coffee),
+otherwise it borrows the other animation's object too (`reading` shows the laptop until there's a `book`).
+
+### Coffee run
+
+After about 5 minutes of Claude working (`CLAWD_COFFEE_AFTER=<seconds>` to change it), Clawd walks off
+the nearest screen edge that doesn't lead onto another monitor, comes back **carrying `objects/coffee.png`
+in its walk animation**, stops to play `sip.png`, carries the cup back off the same edge, and returns
+empty-handed a few seconds later. To put the cup in Clawd's hand
+while walking, add a marker to each frame of `walk.png` — it's ignored on ordinary walks, when nothing is held.
 
 ## Held objects (`sprites/objects/`)
 
 Single images, facing right like Clawd, e.g. `objects/laptop.png`. For an animated object, name it
-`<name>@<frames>.png` with the frames side by side (e.g. `coffee@3.png` for steam). Any size.
+`<name>@<frames>.png` with the frames side by side (e.g. `coffee@3.png` for steam). Any size —
+empty space around the art is trimmed off when loading, so drawing on a 16×16 canvas is fine.
 
 **Where it goes** — by default the object sits on the ground just in front of Clawd. To place it
 yourself, paint **one marker pixel** in each of Clawd's frames:
@@ -60,7 +72,12 @@ yourself, paint **one marker pixel** in each of Clawd's frames:
 - **Magenta `#FF00FF`** — the object goes here, **in front of** Clawd
 - **Cyan `#00FFFF`** — the object goes here, **behind** Clawd
 
-Marker pixels are removed when loading: they're never drawn and never catch clicks.
+Marker pixels are removed when loading: they're never drawn and never catch clicks — so put them on
+pixels that should be empty anyway, e.g. one pixel below Clawd's hand *and* one pixel below the object's
+handle (both offsets cancel out, so the handle still lands on the hand).
+
+**Several marker pixels mark their centre.** Two stacked markers put the anchor half a pixel below the
+top one — handy when a 2-pixel hand has to hold the middle of a 3-pixel handle.
 The object is lined up by its bottom-centre, or by a magenta pixel in the *object's* image if it has one
 (its "grip" — e.g. the corner of the laptop's base, or a cup's handle).
 

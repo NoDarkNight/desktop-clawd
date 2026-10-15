@@ -53,10 +53,14 @@ public sealed class PetWindow : Window, IPetHost
             (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown();
         ContextMenu = new ContextMenu { Items = { quit } };
 
-        // CLAWD_SLEEP_AFTER=<seconds> overrides how long you must be idle before it naps.
-        _brain = double.TryParse(Environment.GetEnvironmentVariable("CLAWD_SLEEP_AFTER"), out var sleepAfter)
-            ? new PetBrain(this) { SleepAfterIdle = sleepAfter }
-            : new PetBrain(this);
+        // CLAWD_SLEEP_AFTER / CLAWD_COFFEE_AFTER=<seconds> override how long you must be idle before it
+        // naps, and how long Claude must work before it goes for a coffee.
+        var defaults = new PetBrain(this);
+        _brain = new PetBrain(this)
+        {
+            SleepAfterIdle = SecondsFromEnvironment("CLAWD_SLEEP_AFTER") ?? defaults.SleepAfterIdle,
+            CoffeeAfter = SecondsFromEnvironment("CLAWD_COFFEE_AFTER") ?? defaults.CoffeeAfter,
+        };
         _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, (_, _) => Tick());
 
         Opened += (_, _) =>
@@ -79,6 +83,7 @@ public sealed class PetWindow : Window, IPetHost
     public (double X, double Y)? CursorPosition => _desktop.CursorPosition;
     public TimeSpan? UserIdle => _desktop.UserIdleTime;
     public IReadOnlyList<EmoteInfo> Emotes => _sprites.Emotes;
+    public bool IsOnScreen(double x, double y) => Screens.ScreenFromPoint(new PixelPoint((int)x, (int)y)) is not null;
 
     public bool TryGetWindowOrigin(nint id, out double left, out double top) =>
         _desktop.TryGetWindowOrigin(id, out left, out top);
@@ -102,11 +107,16 @@ public sealed class PetWindow : Window, IPetHost
         _sprites.Reload();
         ApplyCanvasSize();
         Icon = _sprites.CreateIcon();
-        _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, _brain.EmoteName, 0, force: true);
+        ShowBrain(0, force: true);
     }
 
-    private void ApplyCanvasSize()
-    {
+    private void ShowBrain(double dt, bool force = false) =>
+        _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, _brain.EmoteName, _brain.CarriedObject, dt, force);
+
+    private static double? SecondsFromEnvironment(string name) =>
+        double.TryParse(Environment.GetEnvironmentVariable(name), out var seconds) ? seconds : null;
+
+    private void ApplyCanvasSize()    {
         _view.SideMargin = _sprites.SideMargin;
         Width = (_sprites.Canvas.Width + 2 * _sprites.SideMargin) * PixelScale;
         Height = (_sprites.Canvas.Height + EffectHeadroom) * PixelScale;
@@ -125,7 +135,7 @@ public sealed class PetWindow : Window, IPetHost
         }
 
         _brain.Tick();
-        _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, _brain.EmoteName, dt);
+        ShowBrain(dt);
         ApplyPosition();
         UpdateClickThrough();
     }
@@ -175,7 +185,7 @@ public sealed class PetWindow : Window, IPetHost
         var screen = this.PointToScreen(e.GetPosition(this));
         if (_brain.Move(screen.X, screen.Y))
         {
-            _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, _brain.EmoteName, 0);
+            ShowBrain(0);
             ApplyPosition();
         }
     }
