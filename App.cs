@@ -24,7 +24,7 @@ public sealed class App : Application
             var pet = new PetWindow(sprites) { Icon = sprites.CreateIcon() };
             desktop.MainWindow = pet;
 
-            var listener = new ClaudeListener(activity => Dispatcher.UIThread.Post(() => pet.OnClaude(activity)));
+            var listener = new ClaudeListener((activity, kind) => Dispatcher.UIThread.Post(() => pet.OnClaude(activity, kind)));
             var listening = listener.Start();
             desktop.Exit += (_, _) => listener.Dispose();
 
