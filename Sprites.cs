@@ -84,11 +84,12 @@ public sealed class SpriteLibrary
         }
 
         var fx = new Dictionary<Fx, SpriteFrame>();
-        var customZ = TryLoadSheet(Path.Combine(Directory, "fx", SpriteFrames.FileName(Fx.Z)!));
         foreach (var effect in Enum.GetValues<Fx>())
         {
-            var custom = effect == Fx.ZSmall ? customZ : TryLoadSheet(Path.Combine(Directory, "fx", SpriteFrames.FileName(effect)!));
-            if (custom is not null) customNames.Add("fx/" + effect);
+            // Variants (the small Z, balls 2 and 3) share their owner's file when there is one.
+            var owner = SpriteFrames.FileOwner(effect);
+            var custom = TryLoadSheet(Path.Combine(Directory, "fx", SpriteFrames.FileName(owner)!));
+            if (custom is not null) customNames.Add("fx/" + owner);
             fx[effect] = Cut(custom ?? FromText(SpriteFrames.FxPlaceholders[effect], outline: true));
         }
 

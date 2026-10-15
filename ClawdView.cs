@@ -50,8 +50,23 @@ public sealed class ClawdView : Control
         _headX = _sprites.Canvas.Width / 2.0;
         _headY = top + frame.TopRow;
         _effects.Update(effect, dt, flip, _headX, _headY);
+        if (effect == PetEffect.Juggling) _effects.Hands = JuggleHandsFor(frame, animTime, flip);
 
         if (changed || _effects.IsActive) InvalidateVisual();
+    }
+
+    /// <summary>
+    /// Hands at the frame's outer edges, at raised-arm height; balls peak a few pixels above the head.
+    /// Mirrored with the frame so the throwing hand still matches the raised arm when facing left.
+    /// </summary>
+    private JuggleHands JuggleHandsFor(SpriteFrame frame, double animTime, bool flip)
+    {
+        var (px, py) = _sprites.Placement(frame);
+        var left = px + 1.0;
+        var right = px + frame.Source.Width - 1.0;
+        if (flip) (left, right) = (_sprites.Canvas.Width - left, _sprites.Canvas.Width - right);
+        var handY = py + frame.Source.Height - 7.0;
+        return new JuggleHands(animTime * SpriteFrames.JugglingFps, left, right, handY, py + frame.TopRow - 6.0);
     }
 
     /// <summary>Whether a point in canvas art pixels lands on an opaque pixel of the character.</summary>

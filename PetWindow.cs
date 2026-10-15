@@ -60,6 +60,8 @@ public sealed class PetWindow : Window, IPetHost
         {
             SleepAfterIdle = SecondsFromEnvironment("CLAWD_SLEEP_AFTER") ?? defaults.SleepAfterIdle,
             CoffeeAfter = SecondsFromEnvironment("CLAWD_COFFEE_AFTER") ?? defaults.CoffeeAfter,
+            // CLAWD_DEMO=juggling|coffee|jump|sleep performs that behaviour as soon as it's idle.
+            Demo = Environment.GetEnvironmentVariable("CLAWD_DEMO"),
         };
         _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, (_, _) => Tick());
 

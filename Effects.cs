@@ -4,6 +4,12 @@ using Avalonia.Media;
 namespace DesktopClawd;
 
 /// <summary>
+/// Where the juggling hands are this frame, in canvas art pixels (already mirrored if Clawd faces left),
+/// and the juggling clock in beats — one beat per animation frame, i.e. per throw.
+/// </summary>
+public readonly record struct JuggleHands(double Beat, double LeftX, double RightX, double HandY, double PeakY);
+
+/// <summary>
 /// Overlay effects (sleeping Zs, alert "!", sparkles, dizzy stars) drawn around the character.
 /// Coordinates are art pixels relative to the character canvas; glyphs are never mirrored.
 /// </summary>
@@ -16,6 +22,9 @@ public sealed class EffectsLayer(SpriteLibrary sprites)
     private int _spawned;
 
     private record struct Particle(Fx Glyph, double X, double Y, double Vx, double Vy, double Age, double Life);
+
+    /// <summary>Set by the view each frame while juggling.</summary>
+    public JuggleHands Hands { get; set; }
 
     /// <summary>True while anything is on screen, so the view keeps redrawing.</summary>
     public bool IsActive => _effect != PetEffect.None || _particles.Count > 0;
@@ -89,7 +98,35 @@ public sealed class EffectsLayer(SpriteLibrary sprites)
                     DrawGlyph(ctx, Fx.Star, headX + Math.Cos(angle) * 8, headY - 3 + Math.Sin(angle) * 2, scale, canvasOrigin);
                 }
                 break;
+            case PetEffect.Juggling:
+                DrawCascade(ctx, scale, canvasOrigin);
+                break;
         }
+    }
+
+    /// <summary>
+    /// A three-ball cascade, timed so each hand throws on the beat its arm is raised: each ball flies
+    /// from one hand to the other over two beats, rests a beat in the catching hand, then goes back.
+    /// The left hand throws on even beats and the right on odd ones, the balls a third of a cycle apart.
+    /// </summary>
+    private void DrawCascade(DrawingContext ctx, double scale, Point canvasOrigin)
+    {
+        const double Flight = 2, Hold = 1, Cycle = 2 * (Flight + Hold);
+        var h = Hands;
+        Fx[] balls = [Fx.Ball1, Fx.Ball2, Fx.Ball3];
+        for (var i = 0; i < balls.Length; i++)
+        {
+            var phase = ((h.Beat - 2 * i) % Cycle + Cycle) % Cycle; // ball i is thrown from the left at beat 2i
+            double x, y;
+            if (phase < Flight) (x, y) = Arc(h.LeftX, h.RightX, phase / Flight);
+            else if (phase < Flight + Hold) (x, y) = (h.RightX, h.HandY);
+            else if (phase < 2 * Flight + Hold) (x, y) = Arc(h.RightX, h.LeftX, (phase - Flight - Hold) / Flight);
+            else (x, y) = (h.LeftX, h.HandY);
+            DrawGlyph(ctx, balls[i], x, y, scale, canvasOrigin);
+        }
+
+        (double, double) Arc(double fromX, double toX, double s) =>
+            (fromX + (toX - fromX) * s, h.HandY - 4 * (h.HandY - h.PeakY) * s * (1 - s));
     }
 
     /// <summary>Draws a glyph centred on (x, y), snapped to whole art pixels.</summary>

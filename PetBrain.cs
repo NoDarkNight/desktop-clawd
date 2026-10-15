@@ -33,7 +33,7 @@ public interface IPetHost
 /// <summary>An emote animation and how long one performance of it lasts, in seconds.</summary>
 public readonly record struct EmoteInfo(string Name, double Duration);
 
-public enum PetState { Idle, Walk, Sleep, Held, Falling, Hop, Jump, Land, Slide, Dizzy, Wake, Emote, Sip, CoffeeOut, CoffeeAway, CoffeeBack, CoffeeReturn, CoffeeDropOff, CoffeeHome, Working, Alert, Celebrate }
+public enum PetState { Idle, Walk, Sleep, Held, Falling, Hop, Jump, Land, Slide, Dizzy, Wake, Emote, JuggleWalk, Juggling, Sip, CoffeeOut, CoffeeAway, CoffeeBack, CoffeeReturn, CoffeeDropOff, CoffeeHome, Working, Alert, Celebrate }
 
 /// <summary>What Claude Code is doing, as reported by its hooks.</summary>
 public enum ClaudeActivity { None, Working, NeedsAttention, Done }
@@ -54,7 +54,7 @@ public static class ClaudeTools
 }
 
 /// <summary>Overlay effects drawn around (not mirrored with) the character.</summary>
-public enum PetEffect { None, Sleeping, Alert, Sparkles, Dizzy }
+public enum PetEffect { None, Sleeping, Alert, Sparkles, Dizzy, Juggling }
 
 /// <summary>
 /// Framework-independent behaviour and physics.
@@ -91,6 +91,9 @@ public sealed class PetBrain(IPetHost host)
     private const double EdgeWalkOffChance = 0.4; // chance a walk carries on off a window's edge
     private const double JumpChance = 0.2;     // chance an idle decision is "jump onto a window"
     private const double EmoteChance = 0.1;    // chance an idle decision is "play an emote"
+    private const double JuggleChance = 0.08;  // chance an idle decision (on the floor) is "go juggle at the edge"
+    private const double JuggleEdgeGapMin = 12, JuggleEdgeGapMax = 20; // DIP from the screen edge to where it juggles
+    private const double JuggleTimeMin = 6, JuggleTimeMax = 12; // s
     private const double MinJumpUp = 30, MaxJumpUp = 320, MaxJumpSide = 360, JumpClearance = 36; // DIP
     private const double CursorWatchRange = 220; // DIP
 
@@ -129,6 +132,7 @@ public sealed class PetBrain(IPetHost host)
     private WorkKind _workKind;
     private double _claudeTime;
     private string? _emote;
+    private double _juggleX;           // where it walks to before juggling
     private double _workedSinceCoffee; // s of Claude working since the last coffee
     private WorkArea _coffeeArea;
     private int _coffeeDir;           // -1 = left edge, +1 = right edge
@@ -151,6 +155,12 @@ public sealed class PetBrain(IPetHost host)
     /// <summary>Seconds without keyboard/mouse input before it naps.</summary>
     public double SleepAfterIdle { get; init; } = 90;
 
+    /// <summary>
+    /// A behaviour to perform at the first idle decision, for previewing sprites:
+    /// "juggling", "coffee", "jump" or "sleep".
+    /// </summary>
+    public string? Demo { get; set; }
+
     /// <summary>Seconds of Claude working before Clawd goes for a coffee.</summary>
     public double CoffeeAfter { get; init; } = 300;
 
@@ -160,6 +170,7 @@ public sealed class PetBrain(IPetHost host)
     {
         PetState.Sleep => PetEffect.Sleeping,
         PetState.Dizzy => PetEffect.Dizzy,
+        PetState.Juggling => PetEffect.Juggling,
         PetState.Falling or PetState.Slide when Dazed => PetEffect.Dizzy,
         PetState.Alert => PetEffect.Alert,
         PetState.Celebrate => PetEffect.Sparkles,
@@ -341,6 +352,24 @@ public sealed class PetBrain(IPetHost host)
             return;
         }
 
+        if (_state == PetState.JuggleWalk)
+        {
+            var step = WalkSpeed * S * dt;
+            if (Math.Abs(_juggleX - _x) <= step)
+            {
+                _x = _juggleX;
+                FacingLeft = _x + W / 2 > (area.Left + area.Right) / 2; // face into the screen
+                Enter(PetState.Juggling, JuggleTimeMin + _rng.NextDouble() * (JuggleTimeMax - JuggleTimeMin));
+            }
+            else _x += Math.Sign(_juggleX - _x) * step;
+            return;
+        }
+        if (_state == PetState.Juggling)
+        {
+            if (_stateTime <= 0) Enter(PetState.Idle, 1);
+            return;
+        }
+
         if (_state == PetState.Idle) WatchCursor();
         if (_stateTime <= 0) ChooseNextAction(area);
     }
@@ -387,8 +416,23 @@ public sealed class PetBrain(IPetHost host)
             return;
         }
 
+        if (Demo is { } demo)
+        {
+            Demo = null;
+            var started = demo.ToLowerInvariant() switch
+            {
+                "juggling" or "juggle" => TryStartJuggling(area),
+                "coffee" => TryStartCoffeeRun(area),
+                "jump" => TryStartJump(area),
+                "sleep" => StartNap(),
+                _ => false,
+            };
+            if (started) return;
+        }
+
         var roll = _rng.NextDouble();
         if (roll < JumpChance && TryStartJump(area)) return;
+        if (roll >= JumpChance + EmoteChance && roll < JumpChance + EmoteChance + JuggleChance && TryStartJuggling(area)) return;
         if (roll < JumpChance + EmoteChance && host.Emotes.Count > 0)
         {
             var emote = host.Emotes[_rng.Next(host.Emotes.Count)];
@@ -434,6 +478,25 @@ public sealed class PetBrain(IPetHost host)
         _vx = (targetX - cx) / flightTime;
         FacingLeft = _vx < 0;
         Enter(PetState.Jump);
+        return true;
+    }
+
+    private bool StartNap()
+    {
+        Enter(PetState.Sleep, 10);
+        return true;
+    }
+
+    /// <summary>Heads to the nearer screen edge to juggle there, out of the way of your windows. Floor only.</summary>
+    private bool TryStartJuggling(WorkArea area)
+    {
+        if (_surface.Id != 0) return false;
+        var gap = (JuggleEdgeGapMin + _rng.NextDouble() * (JuggleEdgeGapMax - JuggleEdgeGapMin)) * S;
+        var left = area.Left + gap;
+        var right = area.Right - W - gap;
+        _juggleX = _x - left < right - _x ? left : right;
+        FacingLeft = _juggleX < _x;
+        Enter(PetState.JuggleWalk);
         return true;
     }
 
@@ -744,6 +807,8 @@ public sealed class PetBrain(IPetHost host)
             PetState.Dizzy => Anim.Dizzy,
             PetState.Wake => Anim.Wake,
             PetState.Emote => Anim.Emote,
+            PetState.JuggleWalk => Anim.Walk,
+            PetState.Juggling => Anim.Juggling,
             PetState.Sip => Anim.Sip,
             PetState.CoffeeOut or PetState.CoffeeAway or PetState.CoffeeBack or PetState.CoffeeReturn
                 or PetState.CoffeeDropOff or PetState.CoffeeHome => Anim.Walk,

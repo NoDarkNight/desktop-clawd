@@ -3,13 +3,13 @@ using System.Collections.Generic;
 namespace DesktopClawd;
 
 /// <summary>Every animation the pet can show. Custom art goes in sprites/&lt;name&gt;.png (lowercase).</summary>
-public enum Anim { Idle, Blink, Walk, Sleep, Held, Fall, Jump, Land, Slide, Dizzy, Wake, Happy, Sip, Working, Reading, Searching, Thinking, Alert, Celebrate, Emote }
+public enum Anim { Idle, Blink, Walk, Sleep, Held, Fall, Jump, Land, Slide, Dizzy, Wake, Happy, Juggling, Sip, Working, Reading, Searching, Thinking, Alert, Celebrate, Emote }
 
 /// <summary>
 /// Effect glyphs drawn around the character and never mirrored, so text-like shapes stay readable.
 /// Custom art goes in sprites/fx/&lt;name&gt;.png (a single image each).
 /// </summary>
-public enum Fx { Z, ZSmall, Alert, Sparkle, Star }
+public enum Fx { Z, ZSmall, Alert, Sparkle, Star, Ball1, Ball2, Ball3 }
 
 /// <summary>
 /// Built-in placeholder art, used for any animation or effect without a PNG in the sprites folder.
@@ -61,6 +61,9 @@ public static class SpriteFrames
         [Anim.Searching] = "binoculars",
     };
 
+    /// <summary>Juggling speed: one frame per throw, alternating hands.</summary>
+    public const double JugglingFps = 4;
+
     /// <summary>Playback speed of emotes, in frames per second.</summary>
     public const double EmoteFps = 6;
 
@@ -79,6 +82,7 @@ public static class SpriteFrames
         [Anim.Dizzy] = 4,
         [Anim.Wake] = 2,
         [Anim.Happy] = 6,
+        [Anim.Juggling] = JugglingFps,
         [Anim.Sip] = 3,
         [Anim.Working] = 6,
         [Anim.Reading] = 3,
@@ -92,10 +96,16 @@ public static class SpriteFrames
     public static string FileName(Anim anim) => anim.ToString().ToLowerInvariant() + ".png";
 
     /// <summary>File for an effect glyph, or null if it has no file of its own.</summary>
-    public static string? FileName(Fx fx) => fx switch
+    public static string? FileName(Fx fx) => fx == FileOwner(fx)
+        ? (fx == Fx.Ball1 ? "ball" : fx.ToString().ToLowerInvariant()) + ".png"
+        : null;
+
+    /// <summary>The effect whose file a variant shares: both Zs use z.png, all three balls use ball.png.</summary>
+    public static Fx FileOwner(Fx fx) => fx switch
     {
-        Fx.ZSmall => null, // uses z.png when that exists
-        _ => fx.ToString().ToLowerInvariant() + ".png",
+        Fx.ZSmall => Fx.Z,
+        Fx.Ball2 or Fx.Ball3 => Fx.Ball1,
+        _ => fx,
     };
 
     private static readonly string[] Idle =
@@ -239,6 +249,35 @@ public static class SpriteFrames
         ".O..O......O..O.",
     ];
 
+    // Arms alternating up (throwing) and down (catching); the balls are drawn by code.
+    private static readonly string[] JuggleA =
+    [
+        "..OOOOOOOOOOOO..",
+        "..OOEEOOOOEEOO..",
+        "OOOOEEOOOOEEOO..",
+        "OOOOOOOOOOOOOO..",
+        "..OOOOOOOOOOOOOO",
+        "..OOOOOOOOOOOOOO",
+        "..OOOOOOOOOOOO..",
+        "..DDDDDDDDDDDD..",
+        "...O.O....O.O...",
+        "...O.O....O.O...",
+    ];
+
+    private static readonly string[] JuggleB =
+    [
+        "..OOOOOOOOOOOO..",
+        "..OOEEOOOOEEOO..",
+        "..OOEEOOOOEEOOOO",
+        "..OOOOOOOOOOOOOO",
+        "OOOOOOOOOOOOOO..",
+        "OOOOOOOOOOOOOO..",
+        "..OOOOOOOOOOOO..",
+        "..DDDDDDDDDDDD..",
+        "...O.O....O.O...",
+        "...O.O....O.O...",
+    ];
+
     // Looking down, arms alternating as if typing.
     private static readonly string[] WorkingA =
     [
@@ -297,6 +336,7 @@ public static class SpriteFrames
         [Anim.Dizzy] = [DizzyA, DizzyB],
         [Anim.Wake] = [Blink, Happy],
         [Anim.Happy] = [Happy],
+        [Anim.Juggling] = [JuggleA, JuggleB],
         [Anim.Working] = [WorkingA, WorkingB],
         [Anim.Alert] = [Wave, Idle],
         [Anim.Celebrate] = [Happy, ArmsUpTucked],
@@ -362,6 +402,9 @@ public static class SpriteFrames
             "YWY",
             ".Y.",
         ],
+        [Fx.Ball1] = ["YY", "YY"],
+        [Fx.Ball2] = ["BB", "BB"],
+        [Fx.Ball3] = ["WW", "WW"],
         [Fx.Star] =
         [
             "..Y..",

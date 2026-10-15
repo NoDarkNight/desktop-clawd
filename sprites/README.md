@@ -40,6 +40,7 @@ Draw **only Clawd** — no Zs, "!" or props.
 | `slide.png` | 1–2 | Skidding to a stop after a throw *(uses `land.png` until drawn)* | | 4 |
 | `dizzy.png` | 2 | After being thrown hard | | 4 |
 | `happy.png` | 1–2 | Hop after being clicked | | 6 |
+| `juggling.png` | 2 | Juggling at a screen edge: frame 1 left arm up, frame 2 right arm up (each raised arm throws; the balls are drawn by code) | | 4 |
 | `sip.png` | 1–4 | Sipping the coffee after a coffee run *(uses `idle.png` until drawn)* | `coffee` | 3 |
 | `working.png` | 2–4 | Claude is editing files or running commands | `laptop` | 6 |
 | `reading.png` | 2–4 | Claude is reading/searching files *(uses `working.png` until drawn)* | `book` | 3 |
@@ -47,6 +48,10 @@ Draw **only Clawd** — no Zs, "!" or props.
 | `thinking.png` | 2–4 | You just sent a prompt / Claude is delegating *(uses `working.png` until drawn)* | | 3 |
 | `alert.png` | 2 | Claude needs you | | 3 |
 | `celebrate.png` | 2–3 | Claude finished | | 6 |
+
+**Previewing:** set `CLAWD_DEMO=juggling` (or `coffee`, `jump`, `sleep`) before starting the pet and it does
+that as soon as it's idle — handy for checking a new sprite. (While Claude Code is busy, Clawd is "working"
+instead of idle, so the demo waits until Claude finishes.)
 
 Speeds and held objects live in `SpriteFrames.cs` (`Fps`, `HeldObjects`) if you want to change them.
 An animation that borrows another's art keeps its own object if that object exists (`sip` keeps the coffee),
@@ -98,3 +103,4 @@ backgrounds (the built-in ones get one automatically).
 | `fx/alert.png` | "!" above the head when Claude needs you |
 | `fx/sparkle.png` | Sparkles when Claude finishes |
 | `fx/star.png` | Stars circling the head when dizzy |
+| `fx/ball.png` | The juggling balls (used for all three; the built-in ones are yellow, blue and white) |
