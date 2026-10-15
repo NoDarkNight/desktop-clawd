@@ -22,12 +22,33 @@ public interface IPetHost
     bool TryGetWindowOrigin(nint id, out double left, out double top);
     (double X, double Y)? CursorPosition { get; }
     TimeSpan? UserIdle { get; }
+
+    /// <summary>Custom emote animations available to play while idle.</summary>
+    IReadOnlyList<EmoteInfo> Emotes { get; }
 }
 
-public enum PetState { Idle, Walk, Sleep, Held, Falling, Hop, Jump, Land, Dizzy, Wake, Working, Alert, Celebrate }
+/// <summary>An emote animation and how long one performance of it lasts, in seconds.</summary>
+public readonly record struct EmoteInfo(string Name, double Duration);
+
+public enum PetState { Idle, Walk, Sleep, Held, Falling, Hop, Jump, Land, Slide, Dizzy, Wake, Emote, Working, Alert, Celebrate }
 
 /// <summary>What Claude Code is doing, as reported by its hooks.</summary>
 public enum ClaudeActivity { None, Working, NeedsAttention, Done }
+
+/// <summary>What kind of work Claude is doing, judged from the tool it's using.</summary>
+public enum WorkKind { Typing, Reading, Searching, Thinking }
+
+public static class ClaudeTools
+{
+    public static WorkKind KindOf(string? toolName) => toolName switch
+    {
+        null or "" => WorkKind.Thinking, // prompt submitted, no tool chosen yet
+        "Read" or "Grep" or "Glob" or "LS" or "NotebookRead" => WorkKind.Reading,
+        "WebFetch" or "WebSearch" => WorkKind.Searching,
+        "Task" or "Agent" => WorkKind.Thinking,
+        _ => WorkKind.Typing, // edits, shell commands, MCP tools, ...
+    };
+}
 
 /// <summary>Overlay effects drawn around (not mirrored with) the character.</summary>
 public enum PetEffect { None, Sleeping, Alert, Sparkles, Dizzy }
@@ -45,12 +66,28 @@ public sealed class PetBrain(IPetHost host)
     private const double MaxThrow = 2500;      // DIP/s
     private const double DragThreshold = 4;    // DIP
     private const double WallBounce = 0.5;     // fraction of speed kept when hitting a side or the top
-    private const double LandTime = 0.12;      // s of squash after landing
-    private const double DizzySpeed = 1300;    // DIP/s landing speed that leaves it dizzy
-    private const double DizzyTime = 1.8;      // s
+    private const double LandTime = 0.12;      // s of squash after a hard landing
+    private const double SquashTime = 0.07;    // s of squash on each bounce
+    // Landing tiers, by vertical speed at impact (DIP/s):
+    //   below GentleSpeed: just lands
+    //   GentleSpeed..BounceSpeed: squashes, no bounce
+    //   BounceSpeed..DazeSpeed: bounces (squashing on each impact) until it's slow enough to settle
+    //   above DazeSpeed: knocked silly — dazed while bouncing and for a while after, longer the harder it hit
+    private const double GentleSpeed = 250;
+    private const double BounceSpeed = 900;
+    private const double DazeSpeed = 1500;
+    private const double DazeMinTime = 1.5, DazeMaxTime = 5; // s
+    private const double DazeSecondsPerExtraSpeed = 2.0 / 1000; // s of extra daze per DIP/s above DazeSpeed
+    private const double BounceRestitution = 0.4;   // fraction of vertical speed kept per bounce
+    private const double BounceKeepHorizontal = 0.85; // fraction of sideways speed kept per bounce
+    private const double SlideMinSpeed = 60;   // DIP/s; slower than this just stops (so walk-offs don't skid)
+    private const double SlideMaxSpeed = 900;  // DIP/s; caps how far a hard throw skids
+    private const double SlideFriction = 1600; // DIP/s^2
+    private const double SlideStopSpeed = 15;  // DIP/s
     private const double WakeTime = 1.0;       // s of stretching after waking up
     private const double EdgeWalkOffChance = 0.4; // chance a walk carries on off a window's edge
     private const double JumpChance = 0.2;     // chance an idle decision is "jump onto a window"
+    private const double EmoteChance = 0.1;    // chance an idle decision is "play an emote"
     private const double MinJumpUp = 30, MaxJumpUp = 320, MaxJumpSide = 360, JumpClearance = 36; // DIP
     private const double CursorWatchRange = 220; // DIP
 
@@ -71,10 +108,15 @@ public sealed class PetBrain(IPetHost host)
     private Surface _surface;          // what it's standing on; Id 0 = the screen floor
     private bool _walkOffEdges;
     private bool _dizzyOnLanding;
-    private bool _thrown; // only a throw (not a drop-in or walking off a ledge) can leave it dizzy
+    private bool _droppingIn = true; // the start-up drop never dazes
+    private double _dazeTime;
+    private int _bounces;
+    private double _squashFor;
 
     private ClaudeActivity _claude;
+    private WorkKind _workKind;
     private double _claudeTime;
+    private string? _emote;
 
     private bool _pressed, _dragging;
     private double _pressX, _pressY, _grabX, _grabY;
@@ -87,6 +129,8 @@ public sealed class PetBrain(IPetHost host)
     public double AnimTime => Now - _animStart;
     public bool FacingLeft { get; private set; }
     public bool IsPressed => _pressed;
+    /// <summary>The emote being performed, when <see cref="Animation"/> is <see cref="Anim.Emote"/>.</summary>
+    public string? EmoteName => _state == PetState.Emote ? _emote : null;
 
     /// <summary>Seconds without keyboard/mouse input before it naps.</summary>
     public double SleepAfterIdle { get; init; } = 90;
@@ -95,12 +139,16 @@ public sealed class PetBrain(IPetHost host)
     {
         PetState.Sleep => PetEffect.Sleeping,
         PetState.Dizzy => PetEffect.Dizzy,
+        PetState.Falling or PetState.Slide when Dazed => PetEffect.Dizzy,
         PetState.Alert => PetEffect.Alert,
         PetState.Celebrate => PetEffect.Sparkles,
         PetState.Hop when _claude == ClaudeActivity.NeedsAttention => PetEffect.Alert,
         PetState.Hop when _claude == ClaudeActivity.Done => PetEffect.Sparkles,
         _ => PetEffect.None,
     };
+
+    /// <summary>A hard throw has knocked it silly: still bouncing or skidding, dizzy once it stops.</summary>
+    private bool Dazed => _dizzyOnLanding && _state is PetState.Falling or PetState.Slide;
 
     private double S => host.Scale;
     private double W => host.PxWidth;
@@ -115,9 +163,10 @@ public sealed class PetBrain(IPetHost host)
         _lastTick = Now;
     }
 
-    public void OnClaude(ClaudeActivity activity)
+    public void OnClaude(ClaudeActivity activity, WorkKind kind = WorkKind.Typing)
     {
         _claude = activity;
+        if (activity == ClaudeActivity.Working) _workKind = kind;
         _claudeTime = activity switch
         {
             ClaudeActivity.Working => WorkingTimeout,
@@ -156,6 +205,7 @@ public sealed class PetBrain(IPetHost host)
                 break;
         }
 
+        if (_squashFor > 0) _squashFor -= dt;
         UpdateBlink(dt);
         RefreshAnimation();
     }
@@ -179,7 +229,7 @@ public sealed class PetBrain(IPetHost host)
             Surface? found = null;
             foreach (var s in host.Surfaces)
             {
-                if (s.Id != _surface.Id) continue;
+                if (s.Id != _surface.Id || s.Bottom != _surface.Bottom) continue;
                 var shifted = s.Shift(ox - s.OwnerLeft, oy - s.OwnerTop);
                 if (cx >= shifted.Left && cx <= shifted.Right) { found = shifted; break; }
             }
@@ -195,15 +245,16 @@ public sealed class PetBrain(IPetHost host)
     {
         switch (_state)
         {
+            case PetState.Slide:
+                TickSlide(area, dt);
+                return;
             case PetState.Land:
-                if (_stateTime <= 0)
-                {
-                    if (_dizzyOnLanding) Enter(PetState.Dizzy, DizzyTime);
-                    else Enter(PetState.Idle, 0.4);
-                }
+                if (_stateTime <= 0) AfterLanding();
+
                 return;
             case PetState.Dizzy:
             case PetState.Wake:
+            case PetState.Emote:
                 if (_stateTime <= 0) Enter(PetState.Idle, 0.5);
                 return;
         }
@@ -299,6 +350,13 @@ public sealed class PetBrain(IPetHost host)
 
         var roll = _rng.NextDouble();
         if (roll < JumpChance && TryStartJump(area)) return;
+        if (roll < JumpChance + EmoteChance && host.Emotes.Count > 0)
+        {
+            var emote = host.Emotes[_rng.Next(host.Emotes.Count)];
+            _emote = emote.Name;
+            Enter(PetState.Emote, emote.Duration);
+            return;
+        }
         if (host.UserIdle is null && roll > 0.93)
         {
             // No idle detection on this platform: take the occasional random nap instead.
@@ -317,7 +375,7 @@ public sealed class PetBrain(IPetHost host)
         var options = new List<(Surface Target, double X)>();
         foreach (var s in host.Surfaces)
         {
-            if (s.Id == _surface.Id) continue;
+            if (s.Id == _surface.Id && s.Bottom == _surface.Bottom) continue;
             var rise = feet - s.Top;
             if (rise < MinJumpUp * S || rise > MaxJumpUp * S) continue;
             if (s.Right - s.Left < W * 2.5) continue;
@@ -367,15 +425,91 @@ public sealed class PetBrain(IPetHost host)
         if (landing is null && feet >= floor.Top) landing = floor;
         if (landing is not { } ground) return;
 
-        _dizzyOnLanding = _thrown && _state == PetState.Falling && _vy > DizzySpeed * S;
-        _thrown = false;
         _surface = ground;
         _y = ground.Top - H;
-        _vx = _vy = 0;
-        Enter(PetState.Land, LandTime);
+
+        // Hops and deliberate jumps land cleanly where they aimed.
+        if (_state != PetState.Falling)
+        {
+            var impact = _vy;
+            _vx = _vy = 0;
+            Settle(impact);
+            return;
+        }
+
+        // Only the first impact of a fall decides dizziness; the bounces after it are gentler.
+        if (_bounces == 0)
+        {
+            _dizzyOnLanding = !_droppingIn && _vy > DazeSpeed * S;
+            _dazeTime = Math.Clamp(DazeMinTime + (_vy / S - DazeSpeed) * DazeSecondsPerExtraSpeed, DazeMinTime, DazeMaxTime);
+            _droppingIn = false;
+        }
+
+        // Bounce, losing height each time, with a squash on each impact that isn't gentle.
+        if (_vy > GentleSpeed * S) _squashFor = SquashTime;
+        if (_vy > BounceSpeed * S)
+        {
+            _vy = -_vy * BounceRestitution;
+            _vx *= BounceKeepHorizontal;
+            _bounces++;
+            return;
+        }
+
+        // Settled vertically: skid to a stop if there's sideways speed left.
+        var finalImpact = _vy;
+        _vy = 0;
+        _bounces = 0;
+        if (Math.Abs(_vx) > SlideMinSpeed * S)
+        {
+            var max = SlideMaxSpeed * S;
+            _vx = Math.Clamp(_vx, -max, max);
+            FacingLeft = _vx < 0;
+            Enter(PetState.Slide);
+            return;
+        }
+        _vx = 0;
+        Settle(finalImpact);
     }
 
-    private static Surface Floor(WorkArea area) => new(0, area.Left, area.Right, area.Bottom, 0, 0);
+    /// <summary>Finishes a landing: a squash unless it was gentle (or it's already flat and dazed), then dazed or idle.</summary>
+    private void Settle(double impact)
+    {
+        if (impact > GentleSpeed * S && !_dizzyOnLanding) Enter(PetState.Land, LandTime); // Land then calls AfterLanding
+        else AfterLanding();
+    }
+
+    private void AfterLanding()
+    {
+        if (_dizzyOnLanding)
+        {
+            _dizzyOnLanding = false;
+            Enter(PetState.Dizzy, _dazeTime);
+        }
+        else Enter(PetState.Idle, 0.4);
+    }
+
+    /// <summary>Skids along the surface, slowing down; can slide off a window's edge or bounce off the screen's sides.</summary>
+    private void TickSlide(WorkArea area, double dt)
+    {
+        var slowdown = SlideFriction * S * dt;
+        _vx = Math.Abs(_vx) <= slowdown ? 0 : _vx - Math.Sign(_vx) * slowdown;
+        _x += _vx * dt;
+
+        if (_surface.Id == 0)
+        {
+            if (_x < area.Left) { _x = area.Left; _vx = Math.Abs(_vx) * WallBounce; }
+            if (_x + W > area.Right) { _x = area.Right - W; _vx = -Math.Abs(_vx) * WallBounce; }
+        }
+        // On a window, sliding past the edge makes StandOnSurface fail next tick, and it falls off with its momentum.
+
+        if (Math.Abs(_vx) < SlideStopSpeed * S)
+        {
+            _vx = 0;
+            AfterLanding(); // the impact already happened before the skid, so no squash now
+        }
+    }
+
+    private static Surface Floor(WorkArea area) => new(0, false, area.Left, area.Right, area.Bottom, 0, 0);
 
     // --- Mouse ---
 
@@ -432,7 +566,9 @@ public sealed class PetBrain(IPetHost host)
             _vx = Math.Clamp((_dragSample.X - _prevDragSample.X) / dt, -max, max);
             _vy = Math.Clamp((_dragSample.Y - _prevDragSample.Y) / dt, -max, max);
             if (Now - _dragSample.T > 0.1) _vx = _vy = 0;
-            _thrown = true;
+            _bounces = 0;
+            _dizzyOnLanding = false;
+            _droppingIn = false;
             Enter(PetState.Falling);
         }
         else if (_state is not (PetState.Held or PetState.Falling or PetState.Hop or PetState.Jump))
@@ -481,12 +617,20 @@ public sealed class PetBrain(IPetHost host)
             PetState.Walk => Anim.Walk,
             PetState.Sleep => Anim.Sleep,
             PetState.Held => Anim.Held,
-            PetState.Falling => Anim.Fall,
+            PetState.Falling => Dazed ? Anim.Dizzy : _squashFor > 0 ? Anim.Land : Anim.Fall,
+            PetState.Slide => Dazed ? Anim.Dizzy : Anim.Slide,
             PetState.Jump => Anim.Jump,
             PetState.Land => Anim.Land,
             PetState.Dizzy => Anim.Dizzy,
             PetState.Wake => Anim.Wake,
-            PetState.Working => Anim.Working,
+            PetState.Emote => Anim.Emote,
+            PetState.Working => _workKind switch
+            {
+                WorkKind.Reading => Anim.Reading,
+                WorkKind.Searching => Anim.Searching,
+                WorkKind.Thinking => Anim.Thinking,
+                _ => Anim.Working,
+            },
             PetState.Alert => Anim.Alert,
             PetState.Celebrate => Anim.Celebrate,
             PetState.Hop => _claude switch

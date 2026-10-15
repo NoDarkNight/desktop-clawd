@@ -11,7 +11,7 @@
 
   <ItemGroup>
     <!-- Custom sprites (see sprites/README.md); missing ones fall back to built-in placeholders. -->
-    <None Include="sprites\*.png" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="sprites\**\*.png" Exclude="sprites\templates\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

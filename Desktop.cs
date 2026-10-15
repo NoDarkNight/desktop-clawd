@@ -5,11 +5,12 @@ namespace DesktopClawd;
 
 /// <summary>
 /// A horizontal ledge the pet can stand on, in physical screen pixels: the visible part of a
-/// window's top edge. <see cref="Id"/> identifies the window (0 = the screen floor);
+/// window's top edge, or of its bottom edge (<see cref="Bottom"/>; the pet then stands inside the window).
+/// <see cref="Id"/> identifies the window (0 = the screen floor); <see cref="Top"/> is the ledge's y.
 /// <see cref="OwnerLeft"/>/<see cref="OwnerTop"/> are the window's origin when this was measured,
 /// so the ledge can be shifted when the window moves.
 /// </summary>
-public readonly record struct Surface(nint Id, double Left, double Right, double Top, double OwnerLeft, double OwnerTop)
+public readonly record struct Surface(nint Id, bool Bottom, double Left, double Right, double Top, double OwnerLeft, double OwnerTop)
 {
     public Surface Shift(double dx, double dy) =>
         this with { Left = Left + dx, Right = Right + dx, Top = Top + dy, OwnerLeft = OwnerLeft + dx, OwnerTop = OwnerTop + dy };
@@ -18,7 +19,7 @@ public readonly record struct Surface(nint Id, double Left, double Right, double
 /// <summary>OS-specific desktop access. Everything is optional: unsupported platforms use <see cref="NullDesktop"/>.</summary>
 public interface IDesktopEnvironment
 {
-    /// <summary>Visible top edges of other apps' windows, in physical pixels.</summary>
+    /// <summary>Visible top and bottom edges of other apps' windows, in physical pixels.</summary>
     IReadOnlyList<Surface> ScanSurfaces();
 
     /// <summary>Current origin of a window, or false if it's gone, hidden or minimised.</summary>

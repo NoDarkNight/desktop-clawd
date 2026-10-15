@@ -17,7 +17,6 @@ namespace DesktopClawd;
 public sealed class PetWindow : Window, IPetHost
 {
     private const double PixelScale = 4;     // DIPs per art pixel
-    private const int EffectMargin = 8;      // art px either side of the character
     private const int EffectHeadroom = 20;   // art px above the character
     private const double ScanInterval = 0.1; // s between window scans
 
@@ -36,7 +35,7 @@ public sealed class PetWindow : Window, IPetHost
     public PetWindow(SpriteLibrary sprites)
     {
         _sprites = sprites;
-        _view = new ClawdView(sprites) { Scale = PixelScale, EffectMargin = EffectMargin, Headroom = EffectHeadroom };
+        _view = new ClawdView(sprites) { Scale = PixelScale, Headroom = EffectHeadroom };
 
         Title = "Desktop Clawd";
         CanResize = false;
@@ -79,6 +78,7 @@ public sealed class PetWindow : Window, IPetHost
     public IReadOnlyList<Surface> Surfaces => _surfaces;
     public (double X, double Y)? CursorPosition => _desktop.CursorPosition;
     public TimeSpan? UserIdle => _desktop.UserIdleTime;
+    public IReadOnlyList<EmoteInfo> Emotes => _sprites.Emotes;
 
     public bool TryGetWindowOrigin(nint id, out double left, out double top) =>
         _desktop.TryGetWindowOrigin(id, out left, out top);
@@ -94,7 +94,7 @@ public sealed class PetWindow : Window, IPetHost
 
     // ---
 
-    public void OnClaude(ClaudeActivity activity) => _brain.OnClaude(activity);
+    public void OnClaude(ClaudeActivity activity, WorkKind kind) => _brain.OnClaude(activity, kind);
 
     /// <summary>Re-reads the sprites folder; the window resizes if the canvas changed.</summary>
     public void ReloadSprites()
@@ -102,12 +102,13 @@ public sealed class PetWindow : Window, IPetHost
         _sprites.Reload();
         ApplyCanvasSize();
         Icon = _sprites.CreateIcon();
-        _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, 0, force: true);
+        _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, _brain.EmoteName, 0, force: true);
     }
 
     private void ApplyCanvasSize()
     {
-        Width = (_sprites.Canvas.Width + 2 * EffectMargin) * PixelScale;
+        _view.SideMargin = _sprites.SideMargin;
+        Width = (_sprites.Canvas.Width + 2 * _sprites.SideMargin) * PixelScale;
         Height = (_sprites.Canvas.Height + EffectHeadroom) * PixelScale;
     }
 
@@ -124,7 +125,7 @@ public sealed class PetWindow : Window, IPetHost
         }
 
         _brain.Tick();
-        _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, dt);
+        _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, _brain.EmoteName, dt);
         ApplyPosition();
         UpdateClickThrough();
     }
@@ -134,7 +135,7 @@ public sealed class PetWindow : Window, IPetHost
     {
         var art = PixelScale * RenderScaling;
         var target = new PixelPoint(
-            (int)Math.Round(_brain.X - EffectMargin * art),
+            (int)Math.Round(_brain.X - _sprites.SideMargin * art),
             (int)Math.Round(_brain.Y - EffectHeadroom * art));
         if (Position != target) Position = target;
     }
@@ -174,7 +175,7 @@ public sealed class PetWindow : Window, IPetHost
         var screen = this.PointToScreen(e.GetPosition(this));
         if (_brain.Move(screen.X, screen.Y))
         {
-            _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, 0);
+            _view.Show(_brain.Animation, _brain.AnimTime, _brain.FacingLeft, _brain.Effect, _brain.EmoteName, 0);
             ApplyPosition();
         }
     }

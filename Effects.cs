@@ -29,6 +29,9 @@ public sealed class EffectsLayer(SpriteLibrary sprites)
         {
             _effect = effect;
             _spawnIn = 0;
+            // Leftovers from the previous effect (e.g. Zs after waking) fade out quickly.
+            for (var i = 0; i < _particles.Count; i++)
+                _particles[i] = _particles[i] with { Life = Math.Min(_particles[i].Life, _particles[i].Age + 0.3) };
         }
 
         for (var i = _particles.Count - 1; i >= 0; i--)

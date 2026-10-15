@@ -16,6 +16,13 @@ internal static class Program
                     Console.WriteLine($"{name,-12} {frames} frame(s)  {path}");
                 return;
 
+            // DesktopClawd --list-sprites: show which sprites loaded and where from.
+            case ["--list-sprites"]:
+                BuildAvaloniaApp().SetupWithoutStarting();
+                foreach (var line in new SpriteLibrary().Describe())
+                    Console.WriteLine(line);
+                return;
+
             // DesktopClawd --list-surfaces: show the window ledges the pet can stand on.
             case ["--list-surfaces"] when OperatingSystem.IsWindows():
                 BuildAvaloniaApp().SetupWithoutStarting(); // makes the process per-monitor DPI aware

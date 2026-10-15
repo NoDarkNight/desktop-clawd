@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Text.Json;
 
 namespace DesktopClawd;
 
@@ -8,10 +9,12 @@ namespace DesktopClawd;
 /// <c>POST http://localhost:47821/claude/{working|attention|done|idle}</c> with header <c>X-Clawd: 1</c>.
 /// The header is required so web pages in a browser can't trigger it (browsers can't send
 /// custom headers cross-origin without a CORS preflight, which this never approves).
+/// For "working", the hook's JSON body says which tool Claude is using, which picks the animation.
 /// </summary>
-public sealed class ClaudeListener(Action<ClaudeActivity> onActivity) : IDisposable
+public sealed class ClaudeListener(Action<ClaudeActivity, WorkKind> onActivity) : IDisposable
 {
     public const int Port = 47821;
+    private const long MaxBodyToParse = 4 * 1024 * 1024; // tool inputs can include whole files
 
     private readonly HttpListener _http = new() { Prefixes = { $"http://localhost:{Port}/claude/" } };
 
@@ -56,9 +59,27 @@ public sealed class ClaudeListener(Action<ClaudeActivity> onActivity) : IDisposa
             };
             var valid = activity is not null && request.HttpMethod == "POST" && request.Headers["X-Clawd"] == "1";
 
+            var kind = valid && activity == ClaudeActivity.Working ? await ReadWorkKindAsync(request) : WorkKind.Typing;
+
             ctx.Response.StatusCode = valid ? 204 : 404;
             ctx.Response.Close();
-            if (valid) onActivity(activity!.Value);
+            if (valid) onActivity(activity!.Value, kind);
+        }
+    }
+
+    /// <summary>Reads "tool_name" from the hook payload (absent for a newly submitted prompt).</summary>
+    private static async Task<WorkKind> ReadWorkKindAsync(HttpListenerRequest request)
+    {
+        if (!request.HasEntityBody || request.ContentLength64 > MaxBodyToParse) return WorkKind.Typing;
+        try
+        {
+            using var json = await JsonDocument.ParseAsync(request.InputStream);
+            var tool = json.RootElement.TryGetProperty("tool_name", out var name) ? name.GetString() : null;
+            return ClaudeTools.KindOf(tool);
+        }
+        catch (JsonException)
+        {
+            return WorkKind.Typing;
         }
     }
 

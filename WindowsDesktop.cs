@@ -28,28 +28,39 @@ public sealed class WindowsDesktop : IDesktopEnvironment
         }, 0);
 
         var surfaces = new List<Surface>();
-        var segments = new List<(double L, double R)>();
         for (var i = 0; i < windows.Count; i++)
         {
             var (hwnd, rect, standable) = windows[i];
             if (!standable) continue;
 
-            segments.Clear();
-            segments.Add((rect.Left, rect.Right));
-            for (var j = 0; j < i && segments.Count > 0; j++)
-            {
-                var above = windows[j].Rect;
-                if (above.Top <= rect.Top && above.Bottom > rect.Top)
-                    Subtract(segments, above.Left, above.Right);
-            }
+            // Standing on the top edge: the ledge is visible if nothing in front covers that line.
+            AddVisibleLedges(surfaces, windows, i, bottom: false, y: rect.Top, lineY: rect.Top);
 
-            foreach (var (l, r) in segments)
-            {
-                if (r - l >= MinSurfaceWidth)
-                    surfaces.Add(new Surface(hwnd, l, r, rect.Top, rect.Left, rect.Top));
-            }
+            // Standing on the bottom edge, inside the window: check the window's last row, and skip
+            // edges that hang below the taskbar or off the screen.
+            if (TryGetWorkArea(hwnd, out var work) && rect.Bottom <= work.Bottom)
+                AddVisibleLedges(surfaces, windows, i, bottom: true, y: rect.Bottom, lineY: rect.Bottom - 1);
         }
         return surfaces;
+    }
+
+    /// <summary>Adds the parts of window i's edge at <paramref name="y"/> not covered by windows in front of it.</summary>
+    private static void AddVisibleLedges(List<Surface> surfaces, List<Candidate> windows, int i, bool bottom, int y, int lineY)
+    {
+        var (hwnd, rect, _) = windows[i];
+        var segments = new List<(double L, double R)> { (rect.Left, rect.Right) };
+        for (var j = 0; j < i && segments.Count > 0; j++)
+        {
+            var above = windows[j].Rect;
+            if (above.Top <= lineY && above.Bottom > lineY)
+                Subtract(segments, above.Left, above.Right);
+        }
+
+        foreach (var (l, r) in segments)
+        {
+            if (r - l >= MinSurfaceWidth)
+                surfaces.Add(new Surface(hwnd, bottom, l, r, y, rect.Left, rect.Top));
+        }
     }
 
     public bool TryGetWindowOrigin(nint id, out double left, out double top)
@@ -112,7 +123,7 @@ public sealed class WindowsDesktop : IDesktopEnvironment
         var surfaces = ScanSurfaces();
         yield return $"{surfaces.Count} visible ledge(s):";
         foreach (var s in surfaces)
-            yield return $"  {ClassName(s.Id),-40} x {s.Left,6}..{s.Right,-6} y {s.Top,6}";
+            yield return $"  {ClassName(s.Id),-40} {(s.Bottom ? "bottom" : "top"),-6} x {s.Left,6}..{s.Right,-6} y {s.Top,6}";
     }
 
     private bool TryClassify(nint hwnd, out Candidate candidate)
@@ -151,11 +162,22 @@ public sealed class WindowsDesktop : IDesktopEnvironment
 
     private static bool IsFullScreen(nint hwnd, RECT rect)
     {
-        var monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
-        if (!GetMonitorInfo(monitor, ref info)) return false;
+        if (!TryGetMonitorInfo(hwnd, out var info)) return false;
         var m = info.rcMonitor;
         return rect.Left <= m.Left && rect.Top <= m.Top && rect.Right >= m.Right && rect.Bottom >= m.Bottom;
+    }
+
+    private static bool TryGetWorkArea(nint hwnd, out RECT work)
+    {
+        var ok = TryGetMonitorInfo(hwnd, out var info);
+        work = info.rcWork;
+        return ok;
+    }
+
+    private static bool TryGetMonitorInfo(nint hwnd, out MONITORINFO info)
+    {
+        info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
+        return GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), ref info);
     }
 
     private static bool TryGetBounds(nint hwnd, out RECT rect) =>
